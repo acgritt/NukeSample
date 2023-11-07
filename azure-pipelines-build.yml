@@ -1,0 +1,109 @@
+trigger:
+  branches:
+    include:
+    - master
+
+pool:
+  name: Azure Pipelines
+  vmImage: windows-latest
+
+variables:
+  RestoreBuildProjects: '**/*.csproj'
+  TestProjects: '**/*[Tt]ests/*.csproj'
+  BuildConfiguration: Release
+  BuildPlatform: any cpu
+
+jobs:
+- job: 'Build_API'
+  steps:
+  - task: gitversion/setup@0
+    inputs:
+      versionSpec: '5.x'
+  
+  - task: gitversion/execute@0
+    inputs:
+      useConfigFile: true
+      configFilePath: '$(Build.SourcesDirectory)/GitVersion.yml'
+
+  - task: UseDotNet@2
+    displayName: 'Use .NET Core SDK 7.x'
+    inputs:
+      packageType: sdk
+      version: '7.x'
+      installationPath: $(Agent.ToolsDirectory)/sdk
+  
+  - task: DotNetCoreCLI@2
+    displayName: Restore
+    inputs:
+      command: restore
+      projects: '$(RestoreBuildProjects)'
+      feedsToUse: config
+      nugetConfigPath: src/nuget.config
+  
+  - task: DotNetCoreCLI@2
+    displayName: Test
+    inputs:
+      command: test
+      projects: '$(TestProjects)'
+      arguments: '--configuration $(BuildConfiguration) --collect:"XPlat Code Coverage" --settings src/code-coverage.runsettings'
+  
+  - task: Palmmedia.reportgenerator.reportgenerator-build-release-task.reportgenerator@4
+    displayName: ReportGenerator
+    inputs:
+      reports: '$(Agent.TempDirectory)/*/coverage*.xml;$(Agent.TempDirectory)/**/*.cobertura.xml'
+      targetdir: '$(Build.StagingDirectory)/coverage'
+      assemblyfilters: '-*.Tests;-*.TestHelpers;-FluentValidation;-xunit;-Refit*'
+      classfilters: '-GitVersionInformation'
+      verbosity: Verbose
+      tag: '$(build.buildnumber)'
+  
+  - task: PublishCodeCoeverageResults@1
+    displayName: 'Publish code coverage from $(Build.StagingDirectory)\coverage\cobertura.xml'
+    inputs:
+      codeCoverageTool: Cobertura
+      summaryFileLocation: '$(Build.StagingDirectory)/coverage/cobertura.xml'
+      reportDirectory: '$(Build.StagingDirectory)/coverage'
+      failIfCoverageEmpty: true
+  
+  - task: mspremier.BuildQualityChecks.QualityChecks-task.BuildQualityChecks@6
+    displayName: 'Check build quality'
+    inputs:
+      checkwarnings: true
+      warningFailOption: fixed
+      checkCoverage: true
+      coverageFaileOption: fixed
+      coverateType: lines
+      coverageThreshold: 100
+      buildConfiguration: '$(BuildConfiguration)'
+  
+  - task: DotNetCoreCLI@2
+    displayName: Build
+    inputs:
+      projects: '$(RestoreBuildProjects)'
+      arguments: '--configuration $(BuildConfiguration)'
+
+  - task: PublishSymbols@2
+    displayName: 'Publish symbols path'
+    inputs:
+      SymbolsFolder: '$(Build.SourcesDirectory)/src'
+      SymbolServerType: TeamServices
+  
+  - task: DotNetCoreCLI@2
+    displayName: Publish
+    inputs:
+      command: publish
+      publishWebProjects: false
+      projects: 'src/**/*Api.csproj'
+      arguments: '--configuraiton $(BuildConfiguration) --output $(Build.ArtifactStagingDirectory)'
+      zipAfterPublish: true
+  
+  - task: CopyFiles@2
+    displayName: 'Copy Postman Smoke Tests to Staging Directory'
+    inputs:
+      SourceFolder: 'src/Automated Tests'
+      TargetFolder: '$(Build.StagingDirectory)/ReleaseAssets'
+
+  - task: PublishBuildArtifacts@1
+    displayName: 'Publish Artifact'
+    inputs:
+      PathtoPublish: '$(Build.ArtifactStagingDirectory)'
